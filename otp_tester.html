@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OTP API Test UI</title>
+    <!-- Use Tailwind CSS for clean, responsive styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center justify-center p-4">
+
+    <!-- Main container with a clean card-like design -->
+    <div class="bg-white p-8 rounded-2xl shadow-xl max-w-4xl w-full flex flex-col md:flex-row gap-8">
+
+        <!-- OTP Request Form -->
+        <div class="flex-1">
+            <h2 class="text-3xl font-bold mb-6 text-center text-gray-800">Request OTP</h2>
+            <form id="requestForm" class="space-y-4">
+                <div>
+                    <label for="requestUserId" class="block text-sm font-medium text-gray-700">User ID</label>
+                    <input type="number" id="requestUserId" value="101" required
+                           class="mt-1 block w-full px-4 py-2 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="requestPurpose" class="block text-sm font-medium text-gray-700">Purpose</label>
+                    <input type="text" id="requestPurpose" value="login" required
+                           class="mt-1 block w-full px-4 py-2 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="requestKey" class="block text-sm font-medium text-gray-700">Idempotency Key</label>
+                    <input type="text" id="requestKey" required
+                           class="mt-1 block w-full px-4 py-2 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <button type="submit"
+                        class="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition duration-150 ease-in-out">
+                    Request OTP
+                </button>
+            </form>
+        </div>
+
+        <!-- OTP Verify Form -->
+        <div class="flex-1 mt-8 md:mt-0">
+            <h2 class="text-3xl font-bold mb-6 text-center text-gray-800">Verify OTP</h2>
+            <form id="verifyForm" class="space-y-4">
+                <div>
+                    <label for="verifyUserId" class="block text-sm font-medium text-gray-700">User ID</label>
+                    <input type="number" id="verifyUserId" value="101" required
+                           class="mt-1 block w-full px-4 py-2 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="verifyPurpose" class="block text-sm font-medium text-gray-700">Purpose</label>
+                    <input type="text" id="verifyPurpose" value="login" required
+                           class="mt-1 block w-full px-4 py-2 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div>
+                    <label for="verifyCode" class="block text-sm font-medium text-gray-700">OTP Code</label>
+                    <input type="text" id="verifyCode" required
+                           class="mt-1 block w-full px-4 py-2 bg-gray-50 border border-gray-300 rounded-xl shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <button type="submit"
+                        class="w-full flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-sm text-sm font-medium text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 transition duration-150 ease-in-out">
+                    Verify OTP
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Response Display Area -->
+    <div class="mt-8 bg-gray-800 text-white p-6 rounded-2xl shadow-lg max-w-4xl w-full">
+        <h3 class="text-xl font-semibold mb-2 text-center text-gray-200">API Response</h3>
+        <pre id="responseOutput" class="whitespace-pre-wrap font-mono text-sm overflow-auto max-h-96"></pre>
+    </div>
+
+    <script>
+        // Get form and response elements
+        const requestForm = document.getElementById('requestForm');
+        const verifyForm = document.getElementById('verifyForm');
+        const responseOutput = document.getElementById('responseOutput');
+
+        /**
+         * Generic function to display API response with syntax highlighting.
+         * @param {Object} response The API response object.
+         * @param {number} status The HTTP status code.
+         */
+        const displayResponse = async (response, status) => {
+            const data = await response.json();
+            responseOutput.innerHTML = `
+                <div class="text-lg font-bold">Status: <span class="${status >= 200 && status < 300 ? 'text-green-400' : 'text-red-400'}">${status}</span></div>
+                <div class="text-sm text-gray-400">Response Body:</div>
+                <pre class="bg-gray-700 p-4 rounded-xl text-yellow-300">${JSON.stringify(data, null, 2)}</pre>
+            `;
+        };
+
+        // Handle OTP Request Form submission
+        requestForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const userId = document.getElementById('requestUserId').value;
+            const purpose = document.getElementById('requestPurpose').value;
+            const idempotencyKey = document.getElementById('requestKey').value;
+
+            try {
+                const response = await fetch('http://localhost:3000/otp/request', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Idempotency-Key': idempotencyKey
+                    },
+                    body: JSON.stringify({ user_id: parseInt(userId), purpose })
+                });
+
+                displayResponse(response, response.status);
+
+            } catch (error) {
+                responseOutput.textContent = `Error: ${error.message}`;
+                console.error('Request failed:', error);
+            }
+        });
+
+        // Handle OTP Verify Form submission
+        verifyForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const userId = document.getElementById('verifyUserId').value;
+            const purpose = document.getElementById('verifyPurpose').value;
+            const otpCode = document.getElementById('verifyCode').value;
+
+            try {
+                const response = await fetch('http://localhost:3000/otp/verify', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ user_id: parseInt(userId), purpose, otp_code: otpCode })
+                });
+
+                displayResponse(response, response.status);
+
+            } catch (error) {
+                responseOutput.textContent = `Error: ${error.message}`;
+                console.error('Request failed:', error);
+            }
+        });
+    </script>
+</body>
+</html>
