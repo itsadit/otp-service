@@ -1,0 +1,66 @@
+1. DDL: MySQL Schema
+The following schema is designed to enforce all the assignment's rules at the database level, ensuring correctness and atomicity.
+
+-- Use DB server time to ensure consistency.
+SET time_zone = '+00:00';
+
+-- otps table to manage OTP generation and verification.
+-- The UNIQUE KEY on (user_id, purpose, status) along with application logic guarantees a single active OTP.
+CREATE TABLE otps (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    purpose VARCHAR(50) NOT NULL,
+    otp_code VARCHAR(6) NOT NULL,
+    status ENUM('active', 'used', 'expired', 'locked') NOT NULL DEFAULT 'active',
+    attempts INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP NOT NULL,
+    UNIQUE KEY unique_active_otp (user_id, purpose, status)
+);
+
+-- rate_limits table for rolling window tracking.
+CREATE TABLE rate_limits (
+    id INT PRIMARY KEY AUTO_INCREMENT,
+    user_id INT NOT NULL,
+    ip_address VARCHAR(45) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    KEY idx_user_id_created_at (user_id, created_at),
+    KEY idx_ip_created_at (ip_address, created_at)
+);
+
+-- idempotency table to cache request responses.
+CREATE TABLE idempotency (
+    idempotency_key VARCHAR(255) PRIMARY KEY,
+    response_status_code SMALLINT NOT NULL,
+    response_body TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+2. Short Answers
+How do you guarantee exactly-once success under concurrent /verify?
+This is achieved using a database transaction and a conditional UPDATE statement with row-level locking. The /otp/verify handler locks the OTP row with SELECT ... FOR UPDATE, preventing other concurrent requests from modifying it. The UPDATE statement then includes a WHERE status = 'active' clause, ensuring only the first request can successfully change the status to 'used'.
+
+How do you compute rolling-window limits without cron/Redis?
+Rolling-window rate limits are computed atomically using a database transaction with row-level locking. The handler locks the relevant rate_limits entries with SELECT ... FOR UPDATE. It then checks the count of records within the last 15 minutes. If the limit isn't exceeded, a new record is inserted within the same transaction, preventing race conditions and ensuring correctness.
+
+
+
+3. Event Outputs
+
+1.  201    {"otp_id": 1, "ttl": 300, "remaining_requests": 3}
+
+2.  201    {"otp_id": 2, "ttl": 300, "remaining_requests": 2}
+
+3.  401    {"reason": "Invalid OTP"}
+
+4.  401    {"reason": "Invalid OTP"}
+
+5.  200    {"status": "success"}    
+
+The concurrent request fails.	410	  {"reason": "OTP already used"}
+
+6.  201    {"otp_id": 3, "ttl": 300, "remaining_requests": 1}
+ 
+7.  201    {"otp_id": 4, "ttl": 300, "remaining_requests": 7}
+
+8.  429    {"reason": "Rate limit breached", "cooldown_seconds": 180}

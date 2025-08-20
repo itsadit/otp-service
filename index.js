@@ -1,47 +1,3 @@
-/**
- * FINAL BACKEND ENGINEERING ASSIGNMENT: Node.js & MySQL OTP Service
- *
- * This file contains the complete server-side logic for the assignment, including
- * two endpoints: /otp/request and /otp/verify.
- * It uses Express for a minimal HTTP server and the mysql2/promise library for
- * raw SQL queries and database transactions.
- *
- * --- DDL (Data Definition Language) ---
- * Below are the final MySQL table schemas required for this application. You must
- * run these commands in your MySQL database client to set up the tables.
- *
- * -- otps table to manage OTP generation and verification
- * CREATE TABLE otps (
- * id INT PRIMARY KEY AUTO_INCREMENT,
- * user_id INT NOT NULL,
- * purpose VARCHAR(50) NOT NULL,
- * otp_code VARCHAR(6) NOT NULL,
- * status ENUM('active', 'used', 'expired', 'locked') NOT NULL DEFAULT 'active',
- * attempts INT NOT NULL DEFAULT 0,
- * created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
- * expires_at TIMESTAMP NOT NULL,
- * UNIQUE KEY unique_active_otp (user_id, purpose, status)
- * );
- *
- * -- rate_limits table for rolling window tracking
- * CREATE TABLE rate_limits (
- * id INT PRIMARY KEY AUTO_INCREMENT,
- * user_id INT NOT NULL,
- * ip_address VARCHAR(45) NOT NULL,
- * created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
- * KEY idx_user_id_created_at (user_id, created_at),
- * KEY idx_ip_created_at (ip_address, created_at)
- * );
- *
- * -- idempotency table to cache request responses
- * CREATE TABLE idempotency (
- * idempotency_key VARCHAR(255) PRIMARY KEY,
- * response_status_code SMALLINT NOT NULL,
- * response_body TEXT NOT NULL,
- * created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
- * );
- */
-
 const express = require('express');
 const mysql = require('mysql2/promise');
 require('dotenv').config();
@@ -51,7 +7,6 @@ app.use(express.json());
 app.use(cors());
 
 // database connection
-
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     user: process.env.DB_USER,
@@ -63,7 +18,6 @@ const pool = mysql.createPool({
 });
 
 // helper function
-
 const generateOTP = () => {
     return Math.floor(100000 + Math.random() * 900000).toString();
 };
@@ -85,6 +39,7 @@ const getRemainingCooldown = (earliestRequestTime) => {
 app.get('/', (req, res) => {
     res.status(200).send('OTP service is running. Use POST to /otp/request or /otp/verify.');
 });
+
 /**
  * POST /otp/request
  * Handles the generation of a new OTP, performing idempotency and rate limit checks first.
@@ -94,7 +49,6 @@ app.post('/otp/request', async (req, res) => {
     const ip_address = req.ip;
     const idempotencyKey = req.get('Idempotency-Key');
 
-    // Basic request validation
     if (!user_id || !purpose || !idempotencyKey) {
         return res.status(400).json({ reason: 'user_id, purpose, and Idempotency-Key are required.' });
     }
@@ -121,17 +75,21 @@ app.post('/otp/request', async (req, res) => {
             }
         }
 
+        // --- FIX: Start transaction for atomic rate limit and OTP generation ---
+        await connection.beginTransaction();
+
         // Step 2: Rolling window rate limit checks
         const [userRequests] = await connection.execute(
-            `SELECT created_at FROM rate_limits WHERE user_id = ? AND created_at >= NOW() - INTERVAL '15' MINUTE ORDER BY created_at ASC`,
+            `SELECT created_at FROM rate_limits WHERE user_id = ? AND created_at >= NOW() - INTERVAL '15' MINUTE ORDER BY created_at ASC FOR UPDATE`,
             [user_id]
         );
         const [ipRequests] = await connection.execute(
-            `SELECT created_at FROM rate_limits WHERE ip_address = ? AND created_at >= NOW() - INTERVAL '15' MINUTE ORDER BY created_at ASC`,
+            `SELECT created_at FROM rate_limits WHERE ip_address = ? AND created_at >= NOW() - INTERVAL '15' MINUTE ORDER BY created_at ASC FOR UPDATE`,
             [ip_address]
         );
 
         if (userRequests.length >= 3) {
+            await connection.rollback();
             const cooldown = getRemainingCooldown(userRequests[0].created_at);
             const response = { reason: 'user_rate_limit_exceeded', cooldown_seconds_remaining: cooldown };
             await connection.execute(`INSERT INTO idempotency (idempotency_key, response_status_code, response_body) VALUES (?, ?, ?)`,
@@ -141,6 +99,7 @@ app.post('/otp/request', async (req, res) => {
         }
 
         if (ipRequests.length >= 8) {
+            await connection.rollback();
             const cooldown = getRemainingCooldown(ipRequests[0].created_at);
             const response = { reason: 'ip_rate_limit_exceeded', cooldown_seconds_remaining: cooldown };
             await connection.execute(`INSERT INTO idempotency (idempotency_key, response_status_code, response_body) VALUES (?, ?, ?)`,
@@ -149,11 +108,7 @@ app.post('/otp/request', async (req, res) => {
             return res.status(429).json(response);
         }
 
-        // --- Step 3: Transaction for OTP Generation ---
-        await connection.beginTransaction();
-
-        // Check for an active OTP with a lock to enforce single-active-OTP rule.
-        // We do this inside the transaction to prevent race conditions.
+        // Step 3: Check for an active OTP with a lock to enforce single-active-OTP rule.
         const [activeOtp] = await connection.execute(
             `SELECT id FROM otps WHERE user_id = ? AND purpose = ? AND status = 'active' FOR UPDATE`,
             [user_id, purpose]
@@ -184,7 +139,6 @@ app.post('/otp/request', async (req, res) => {
             [user_id, ip_address]
         );
 
-        // Commit the transaction
         await connection.commit();
 
         const responseBody = {
@@ -220,7 +174,6 @@ app.post('/otp/request', async (req, res) => {
 app.post('/otp/verify', async (req, res) => {
     const { user_id, purpose, otp_code } = req.body;
 
-    // Basic request validation
     if (!user_id || !purpose || !otp_code) {
         return res.status(400).json({ reason: 'user_id, purpose, and otp_code are required.' });
     }
@@ -244,23 +197,20 @@ app.post('/otp/verify', async (req, res) => {
         const otp = otpRows[0];
         const now = new Date();
 
-        // --- CHANGE START ---
-        // CHECK 1: Ensure the OTP is in an 'active' state before doing anything else.
+        // Check 1: Ensure the OTP is in an 'active' state before doing anything else.
         if (otp.status !== 'active') {
             await connection.rollback();
-            // This covers all non-active states: 'used', 'expired', or 'locked'.
             return res.status(410).json({ reason: 'code_used' });
         }
-        // --- CHANGE END ---
 
-        // CHECK 2: Now that we know it's active, check for expiration.
+        // Check 2: Now that we know it's active, check for expiration.
         if (otp.expires_at.getTime() < now.getTime()) {
             await connection.execute(`UPDATE otps SET status = 'expired' WHERE id = ?`, [otp.id]);
             await connection.commit();
             return res.status(410).json({ reason: 'code_expired' });
         }
 
-        // CHECK 3: Check for code correctness and max attempts.
+        // Check 3: Check for code correctness and max attempts.
         if (otp.otp_code !== otp_code) {
             const newAttempts = otp.attempts + 1;
             if (newAttempts >= 3) {
@@ -277,7 +227,15 @@ app.post('/otp/verify', async (req, res) => {
         }
 
         // If all checks pass, mark OTP as used to ensure exactly-once success
-        await connection.execute(`UPDATE otps SET status = 'used' WHERE id = ?`, [otp.id]);
+        const [updateResult] = await connection.execute(`
+            UPDATE otps SET status = 'used' WHERE id = ? AND status = 'active'
+        `, [otp.id]);
+
+        if (updateResult.affectedRows === 0) {
+            await connection.rollback();
+            return res.status(410).json({ reason: 'OTP already used' });
+        }
+
         await connection.commit();
 
         res.status(200).json({ message: 'OTP verified successfully.' });
